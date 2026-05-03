@@ -1,5 +1,7 @@
+from csv import reader
 import os
 import pickle
+from pydoc import text
 import numpy as np
 from flask import Flask, request, jsonify
 import faiss
@@ -19,9 +21,7 @@ import json
 
 import subprocess
 
-from paddleocr import PaddleOCR
 
-ocr = PaddleOCR(use_angle_cls=True, lang='en')
 
 def convert_to_pdf(input_path):
     output_dir = os.path.dirname(input_path)
@@ -57,7 +57,7 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1"
 )
 
-# pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 DIM = 384
@@ -88,11 +88,55 @@ def save_state():
 # FILE → TEXT
 def extract_text(path):
     ext = os.path.splitext(path)[1].lower()
+    
 
     if ext == ".pdf":
-        reader = PdfReader(path)
-        return "".join([p.extract_text() or "" for p in reader.pages])
+        try:
+             reader = PdfReader(path)
+        except Exception as e:
+            print("PDF READ ERROR:", str(e))
+            return ""
+        
+        text = ""
 
+        for page in reader.pages:
+            text += page.extract_text() or ""
+
+        # CLEAN AFTER FULL EXTRACTION
+        text = "\n".join([
+            line for line in text.split("\n")
+            if len(line.strip()) > 10
+        ])
+
+        # IF TEXT EMPTY → USE OCR
+        if text.strip():
+            return text
+
+        print("⚠️ PDF has no text, using OCR...")
+
+        try:
+            import pdf2image
+
+            images = pdf2image.convert_from_path(
+                path,
+                poppler_path=r"D:\Notes House FYP\tools\poppler-25.12.0\Library\bin"
+            )
+
+            ocr_text = ""
+
+            for img in images:
+                text = pytesseract.image_to_string(img)
+                ocr_text += text + "\n"
+
+            print("OCR TEXT SAMPLE:", ocr_text[:200])
+
+            return ocr_text
+
+        except Exception as e:
+            print("OCR ERROR:", str(e))
+            return ""
+
+    
     elif ext == ".docx":
         doc = Document(path)
         return "\n".join([p.text for p in doc.paragraphs])
@@ -117,15 +161,9 @@ def extract_text(path):
 
             cv2.imwrite("temp_ocr.jpg", gray)
 
-            result = ocr.predict("temp_ocr.jpg")
+            text = pytesseract.image_to_string(gray)
 
-            text = ""
-
-            if result and result[0]:
-                for line in result[0]:
-                    text += line[1][0] + "\n"
-
-            print("OCR OUTPUT:", text[:200])  # 🔥 DEBUG
+            print("OCR OUTPUT:", text[:200])  #  DEBUG
 
             return text
 
@@ -139,27 +177,256 @@ def extract_text(path):
 # CHUNKING
 
 def chunk_text(text):
-    words = text.split()
-    return [" ".join(words[i:i+CHUNK_SIZE]) for i in range(0, len(words), CHUNK_SIZE)]
+    import re
 
+    # 🔹 Clean text (VERY IMPORTANT)
+    # text = re.sub(r'\s+', ' ', text)
+    text = text.replace("\n", " ")
+
+    # 🔹 Split by sentences instead of words
+    paragraphs = [p.strip() for p in text.split("\n") if len(p.strip()) > 20]
+    MAX_CHUNK_SIZE = 1200  
+    OVERLAP = 200 
+    chunks = []
+    current_chunk = ""
+
+    for sentence in paragraphs:
+        if len(current_chunk) + len(sentence) < MAX_CHUNK_SIZE:
+            current_chunk += " " + sentence
+        else:
+            chunks.append(current_chunk.strip())
+            current_chunk = current_chunk[-OVERLAP:] + "\n" + sentence
+
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
+    return chunks
 # STORE
-def add_chunks(chunks):
-    emb = embed_model.encode(chunks, batch_size=8)
+def add_chunks(chunks, source):
+    clean_chunks = []
+
+    for chunk in chunks:
+
+        #  skip noisy chunks
+        if len(chunk.split()) < 15:
+            continue
+
+        if chunk.count(" ") < 15:
+            continue
+
+        if any(x in chunk for x in ["{", "}", ";", "//"]):
+            continue
+
+        clean_chunks.append(chunk)
+
+    if not clean_chunks:
+        return
+
+    #  ONLY CLEAN DATA goes to FAISS
+    emb = embed_model.encode(clean_chunks, batch_size=8)
     index.add(np.array(emb))
-    documents.extend(chunks)
+
+    for chunk in clean_chunks:
+        documents.append({
+            "text": chunk,
+            "source": source
+        })
+
     save_state()
 
+# Keyword search 
+def keyword_search(query, top_k=10,session_id=None):
+    results = []
+    query_words = query.lower().split()
+
+    for doc in documents:
+        text = doc["text"].lower()
+
+        #  Strong scoring (names / keywords boost)
+        score = sum(8 for word in query_words if word in text)
+
+        #  Extra boost for full phrase match
+        if session_id and session_id in doc["source"]:
+            score += 10
+        if query.lower() in text:
+            score += 10
+
+        if score > 0:
+            results.append((score, doc["text"]))
+
+    results.sort(reverse=True, key=lambda x: x[0])
+    return [r[1] for r in results[:top_k]]
 # SEARCH
 
-def search(query, k=TOP_K):
+def search(query, k=TOP_K, source=None, session_id=None):
     if len(documents) == 0:
         return []
 
+    query_lower = query.lower()
+    query_words = query_lower.split()
+
+    #  detect factual / short queries (names, roles, etc.)
+    is_fact_query = any(w in query_lower for w in [
+        "who", "name", "supervisor", "represented",
+    "submitted", "author", "developer", "team", "group"
+    ]) or len(query_words) <= 5
+
+    # 🔹 1. Semantic search
     q_emb = embed_model.encode([query])
-    D, I = index.search(np.array(q_emb), k)
-    return [documents[i] for i in I[0]]
+    D, I = index.search(np.array(q_emb), k * 10)
+
+    semantic_results = []
+
+    for idx, dist in zip(I[0], D[0]):
+
+        # 🔥 filter weak matches
+        if dist > 2.5:
+            continue
+
+        doc = documents[idx]
+
+# 🔥 SESSION PRIORITY (ADD THIS BLOCK)
+        if session_id and session_id in doc["source"]:
+            semantic_results.insert(0, doc["text"])
+            continue
+
+        # existing filter
+        if source and source not in doc["source"]:
+            continue
+
+        semantic_results.append(doc["text"])
+    # 🔹 2. Keyword search
+    keyword_results = keyword_search(query, top_k=10, session_id=session_id)
+
+    # 🔹 3. Exact match boost
+    exact_matches = []
+
+    for doc in documents:
+        text = doc["text"].lower()
+
+        match_count = sum(1 for word in query_words if word in text)
+        if session_id and session_id in doc["source"]:
+            match_count += 2
+
+        if match_count > 0:
+            for _ in range(match_count * 3):
+                exact_matches.append(doc["text"])
+
+    # 🔹 4. Strong keyword candidates (generic fix)
+    keyword_strong = []
+
+    for doc in documents:
+        text = doc["text"].lower()
+
+        match_count = sum(1 for w in query_words if w in text)
+
+        if match_count >= 2:
+            if session_id and session_id in doc["source"]:
+                keyword_strong.insert(0, doc["text"])  # 🔥 priority
+            else:
+                keyword_strong.append(doc["text"])
+
+    # 🔹 5. FILTER semantic (important for factual queries)
+    if is_fact_query:
+        filtered_semantic = []
+        for chunk in semantic_results:
+            text = chunk.lower()
+            if sum(1 for w in query_words if w in text) >= 1:
+                filtered_semantic.append(chunk)
+    else:
+        filtered_semantic = semantic_results
+    # 🔥 FORCE INCLUDE (SESSION KEYWORD MATCH)
+    for doc in documents:
+        if session_id and session_id in doc["source"]:
+            text = doc["text"].lower()
+
+            if any(w in text for w in query_words):
+                filtered_semantic.insert(0, doc["text"])
+
+    # 🔹 6. Merge all
+    combined = exact_matches + keyword_strong + filtered_semantic + keyword_results
+    combined = list(dict.fromkeys(combined))
+    # 🔹 7. Rerank
+    scored = []
+
+   
+
+    for chunk in combined:
+        text = chunk.lower()
+
+        score = 0
+
+        # 🔥 SESSION BOOST (CORRECT PLACE)
+        for doc in documents:
+            if doc["text"] == chunk and session_id and session_id in doc["source"]:
+                score += 20
+                break
 
 
+        # keyword strength
+        match_count = sum(1 for word in query_words if word in text)
+        score += match_count * 8
+
+        # exact phrase boost
+        if query_lower in text:
+            score += 40
+
+        # 🔥 name boost
+        if any(word[0].isupper() for word in query.split()):
+            score += 10
+
+        # length penalty
+        score -= len(text) * 0.0005
+
+        scored.append((score, chunk))
+
+    scored.sort(reverse=True, key=lambda x: x[0])
+
+    # 🔹 8. Remove duplicates + limit
+    # 🔥 GROUP BY FILE (NEW LOGIC)
+    file_map = {}
+
+    for score, chunk in scored:
+        for doc in documents:
+            if doc["text"] == chunk:
+                src = doc["source"]
+
+                if src not in file_map:
+                    file_map[src] = {
+                        "score": 0,
+                        "chunks": []
+                    }
+
+                file_map[src]["score"] += score
+                file_map[src]["chunks"].append(chunk)
+                break
+
+    # 🔥 SORT FILES BY SCORE
+    sorted_files = sorted(
+        file_map.items(),
+        key=lambda x: x[1]["score"],
+        reverse=True
+    )
+
+    # 🔥 BUILD FINAL RESULTS
+    final = []
+
+    for src, data in sorted_files:
+        for chunk in data["chunks"][:3]:  # max 3 chunks per file
+            final.append({
+                "text": chunk,
+                "source": src
+            })
+
+        if len(final) >= k:
+            break
+
+    # 🔥 DEBUG
+    print("\n🔥 FINAL TOP CHUNKS:")
+    for i, item in enumerate(final[:5]):
+        print(f"\n{i+1}:", item["text"][:200])
+
+    return final
 # OPENAI CALL
 
 def call_openai(prompt, max_tokens=700, json_mode=False):
@@ -182,16 +449,19 @@ def call_openai(prompt, max_tokens=700, json_mode=False):
 
 def build_answer_prompt(context, question):
     return f"""
-You are an AI assistant for students.
+You are a helpful AI assistant.
 
-Answer the question clearly using the given context.
+Answer the question using ONLY the given context.
 
-Rules:
-- Give complete answer (no cut sentences)
-- Use proper paragraphs
-- Use bullet points or numbering if needed
-- Do NOT leave incomplete lines
-- Keep answer clean and structured
+RULES:
+- Give a COMPLETE answer (not short)
+- Explain clearly in simple language
+- If multiple points exist → use bullet points
+- Combine information from multiple chunks if needed
+- Do NOT say "not found"
+- Do NOT guess
+- Do NOT use external knowledge
+- Answer should feel like a short explanation, not just a line
 
 Context:
 {context}
@@ -201,6 +471,7 @@ Question:
 
 Answer:
 """
+
 def build_quiz_prompt(context):
     return f"""
 You are a strict JSON generator.
@@ -241,22 +512,54 @@ Context:
 """
 # UPLOAD
 
+indexed_hashes = set()
+
 @app.route("/upload", methods=["POST"])
 def upload():
-    file = request.files["file"]
-    path = os.path.join(UPLOAD_DIR, file.filename)
-    file.save(path)
+    path = None
+    try:
+        import hashlib
 
-    text = extract_text(path)
+        file = request.files["file"]
 
-    if not text.strip():
-        return jsonify({"error": "No text extracted"})
+        file_bytes = file.read()
+        file_hash = hashlib.sha256(file_bytes).hexdigest()
 
-    chunks = chunk_text(text)
-    add_chunks(chunks)
+        file.seek(0)
 
-    return jsonify({"status": "indexed", "chunks": len(chunks)})
+        if file_hash in indexed_hashes:
+            return jsonify({"status": "already indexed"})
 
+        indexed_hashes.add(file_hash)
+
+        path = os.path.join(UPLOAD_DIR, file.filename)
+        file.save(path)
+
+        text = extract_text(path)
+        print("TEXT LENGTH:", len(text))  
+        print("TEXT SAMPLE:", text[:200]) 
+        if not text.strip():
+            return jsonify({"error": "No text extracted"})
+
+        chunks = chunk_text(text)
+        print("CHUNKS COUNT:", len(chunks)) 
+        session_id = request.form.get("session_id", "global")
+
+        source = f"{session_id}/{file.filename}"
+
+        add_chunks(chunks, source=source)
+
+        return jsonify({"status": "indexed", "chunks": len(chunks)})
+
+    except Exception as e:
+        print("UPLOAD ERROR:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        if path and os.path.exists(path):
+            os.remove(path)  
+        
+            
 
 @app.route("/convert", methods=["POST"])
 def convert_file():
@@ -272,30 +575,161 @@ def convert_file():
 
     try:
         if ext == ".pdf":
-            return jsonify({"pdfPath": input_path})
+    # still check readability later via extract_text
+            result = os.path.basename(input_path)
+        else:
+            pdf_path = convert_to_pdf(input_path)
+            result = os.path.basename(pdf_path)
 
-        pdf_path = convert_to_pdf(input_path)
-
-        return jsonify({"pdfPath": pdf_path})
+        return jsonify({"pdfPath": result})
 
     except Exception as e:
         print("CONVERSION ERROR:", str(e))
         return jsonify({"error": str(e)}), 500
 
+    finally:
+        # 🔥 ADD THIS (CRITICAL)
+        if os.path.exists(input_path):
+            os.remove(input_path)
 # ASK (RAG)
 
+@app.route("/ask-rag", methods=["POST"])
+def ask_rag():
+    try:
+        data = request.get_json()
+
+        question = data.get("question")
+        source = data.get("source")
+        session_id = data.get("session_id")
+
+        if not question:
+            return jsonify({"error": "Question required"}), 400
+
+        # 🔹 1. Retrieve chunks (session-aware search)
+        context_chunks = search(
+            question,
+            source=source,
+            session_id=session_id
+        )
+
+        print("\n🧠 QUESTION:", question)
+
+        print("\n========== RETRIEVED CHUNKS ==========")
+        for i, item in enumerate(context_chunks[:5]):
+            print(f"\nCHUNK {i+1}:\n", item["text"][:300])
+        print("======================================")
+
+        # 🔹 2. Split into session + global
+        session_chunks = []
+        global_chunks = []
+
+        for item in context_chunks:
+            text = item["text"]
+            source = item["source"]
+
+            if session_id and session_id in source:
+                session_chunks.append(text)
+            else:
+                global_chunks.append(text)
+
+        # 🔹 3. Build smart context
+        context = ""
+
+        if session_chunks:
+            # 🔥 session priority (main file user is working on)
+            # 🔥 GROUP BY SOURCE (FILE)
+            file_context = {}
+
+# 🔥 PRIORITIZE SESSION FILE
+            for item in context_chunks:
+                src = item["source"]
+                text = item["text"]
+
+                #  ONLY include session file first
+                if session_id and session_id in src:
+                    if src not in file_context:
+                        file_context[src] = []
+                    file_context[src].append(text)
+
+            # 🔥 fallback (agar session empty ho)
+            if not file_context:
+                for item in context_chunks:
+                    src = item["source"]
+                    text = item["text"]
+
+                    if src not in file_context:
+                        file_context[src] = []
+
+                    file_context[src].append(text)
+            # 🔥 PICK BEST FILE
+            best_file = max(file_context.items(), key=lambda x: len(x[1]))[0]
+
+            # 🔥 BUILD CONTEXT FROM SAME FILE
+            context = "\n\n".join(file_context[best_file][:12])
+        else:
+            # 🔥 fallback to global chunks
+            context = "\n\n".join(global_chunks[:6])
+
+        # 🔹 4. Weak context detection
+        is_weak_context = (
+            not context_chunks
+            or len(context_chunks) < 2
+            or len(context_chunks[0]["text"].split()) < 25
+        )
+
+        # 🔹 5. GLOBAL FALLBACK (important)
+        if is_weak_context and not session_chunks:
+            print("⚠️ Weak context → controlled fallback")
+
+            prompt = f"""
+        Answer the question.
+
+        RULES:
+        - If you are sure → answer
+        - If unsure → say "This is not available in uploaded data"
+        - Keep answer short
+
+        Question:
+        {question}
+        """
+
+            answer = call_openai(prompt, max_tokens=300)
+
+            return jsonify({
+                "answer": answer,
+                "mode": "fallback/Global"
+            })
+
+        # 🔹 6. RAG Answer
+        prompt = build_answer_prompt(context, question)
+        answer = call_openai(prompt, max_tokens=700)
+
+        return jsonify({
+            "answer": answer,
+            "mode": "rag"
+        })
+
+    except Exception as e:
+        print("ASK_RAG ERROR:", str(e))
+        return jsonify({"error": str(e)}), 500
+#  COMBINED ENDPOINT
 @app.route("/ask-ai", methods=["POST"])
-def ask():
-    q = request.json["question"]
+def ask_ai():
+    try:
+        data = request.get_json()
+        question = data.get("question")
 
-    context_chunks = search(q)
-    context = "\n".join(context_chunks)[:1500]
+        if not question:
+            return jsonify({"error": "Question required"}), 400
 
-    prompt = build_answer_prompt(context, q)
-    # answer = call_openai(prompt)
-    answer = call_openai(prompt, max_tokens=700)
+        prompt = f"Answer clearly:\n{question}"
+        answer = call_openai(prompt, max_tokens=700)
 
-    return jsonify({"answer": answer})
+        return jsonify({"answer": answer})
+
+    except Exception as e:
+        print("ASK_AI ERROR:", str(e))
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/ask-pdf", methods=["POST"])
@@ -306,33 +740,34 @@ def ask_pdf():
     if not file or not question:
         return jsonify({"error": "Missing file or question"}), 400
 
-    # temp_path = "temp.pdf"
     temp_path = os.path.join(UPLOAD_DIR, file.filename)
     file.save(temp_path)
 
-    text = extract_text(temp_path)  
+    text = extract_text(temp_path)
     if not text.strip():
-       return jsonify({"error": "No text extracted"})
- 
-    chunks = chunk_text(text)      
+        return jsonify({"error": "No text extracted"})
 
-    embeddings = embed_model.encode(chunks)
+    chunks = chunk_text(text)
 
-    temp_index = faiss.IndexFlatL2(embeddings.shape[1])
-    temp_index.add(np.array(embeddings))
+    # ✅ SESSION MEMORY (MAIN FIX)
+    session_id = request.form.get("session_id", "temp_session")
+    source = f"{session_id}/{file.filename}"
 
-    q_embedding = embed_model.encode([question])
+    add_chunks(chunks, source=source)
 
-    D, I = temp_index.search(np.array(q_embedding), k=3)
+    # ✅ USE GLOBAL SEARCH (NOT TEMP INDEX)
+    results = search(question, session_id=session_id)
 
-    relevant_chunks = [chunks[i] for i in I[0]]
+    relevant_chunks = [r["text"] for r in results[:5]]
 
     context = "\n".join(relevant_chunks)
 
     prompt = build_answer_prompt(context, question)
     answer = call_openai(prompt, max_tokens=700)
-    return jsonify({"answer": answer})
 
+    os.remove(temp_path)
+
+    return jsonify({"answer": answer})
 
 @app.route("/ask-file", methods=["POST"])
 def ask_file():
@@ -367,7 +802,7 @@ def ask_file():
 
     prompt = build_answer_prompt(context, question)
     answer = call_openai(prompt, max_tokens=700)
-
+    os.remove(temp_path) 
     return jsonify({"answer": answer})
 # QUIZ
 
@@ -436,8 +871,7 @@ def generate_quiz_file():
         clean = raw[start:end]
         data = json.loads(clean)
 
-        # return jsonify(data)
-        # 🔥 ALWAYS RETURN SAME STRUCTURE
+        # ALWAYS RETURN SAME STRUCTURE
         quiz = data.get("quiz")
 
         if not quiz or not isinstance(quiz, list):
@@ -460,5 +894,5 @@ def generate_quiz_file():
 # RUN
 # =========================
 if __name__ == "__main__":
-    # app.run(debug=True,use_reloader=False)
-    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
+    # app.run(debug=True,)
+    app.run(host="0.0.0.0", port=5000, debug=True,use_reloader=False)
