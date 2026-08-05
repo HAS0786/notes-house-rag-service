@@ -21,6 +21,10 @@ import json
 
 import subprocess
 
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 
 def convert_to_pdf(input_path):
@@ -895,4 +899,7 @@ def generate_quiz_file():
 # =========================
 if __name__ == "__main__":
     # app.run(debug=True,)
-    app.run(host="0.0.0.0", port=5000, debug=True,use_reloader=False)
+    # app.run(host="0.0.0.0", port=5000, debug=True,use_reloader=False)
+    app.run(
+    host=os.getenv("FLASK_HOST"),
+    port=int(os.getenv("FLASK_PORT")))
