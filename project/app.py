@@ -29,9 +29,7 @@ load_dotenv()
 
 def convert_to_pdf(input_path):
     output_dir = os.path.dirname(input_path)
-
     libreoffice_path = r"C:\Program Files\LibreOffice\program\soffice.exe"
-
     result = subprocess.call([
         libreoffice_path,
         '--headless',
