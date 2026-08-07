@@ -29,7 +29,8 @@ load_dotenv()
 
 def convert_to_pdf(input_path):
     output_dir = os.path.dirname(input_path)
-    libreoffice_path = r"C:\Program Files\LibreOffice\program\soffice.exe"
+    # libreoffice_path = r"C:\Program Files\LibreOffice\program\soffice.exe"
+    libreoffice_path = "soffice"
     result = subprocess.call([
         libreoffice_path,
         '--headless',
@@ -119,10 +120,7 @@ def extract_text(path):
         try:
             import pdf2image
 
-            images = pdf2image.convert_from_path(
-                path,
-                poppler_path=r"D:\Notes House FYP\tools\poppler-25.12.0\Library\bin"
-            )
+            images = pdf2image.convert_from_path(path)
 
             ocr_text = ""
 
@@ -899,5 +897,6 @@ if __name__ == "__main__":
     # app.run(debug=True,)
     # app.run(host="0.0.0.0", port=5000, debug=True,use_reloader=False)
     app.run(
-    host=os.getenv("FLASK_HOST"),
-    port=int(os.getenv("FLASK_PORT")))
+    host=os.getenv("FLASK_HOST", "0.0.0.0"),
+    port=int(os.getenv("FLASK_PORT", "5000"))
+)
