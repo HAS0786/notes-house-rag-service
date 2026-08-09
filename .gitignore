@@ -1,1 +1,5 @@
-/rag_env
+.env
+__pycache__/
+*.pyc
+data/temp/
+rag_env/
