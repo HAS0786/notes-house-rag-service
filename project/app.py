@@ -173,6 +173,142 @@ def extract_text(path):
 
     return ""
 
+# =========================
+# KEYWORD EXTRACTION
+# =========================
+
+def extract_keywords(text):
+    """
+    Extract important domain-specific keywords from document text.
+    If AI keyword extraction fails, return an empty list so that
+    the normal upload flow is not affected.
+    """
+
+    if not text or not text.strip():
+        return []
+
+    # Keep prompt reasonably small
+    clean_text = text[:12000]
+
+    prompt = f"""
+You are a document keyword extraction system.
+
+Extract the 10 to 15 MOST IMPORTANT keywords or short technical concepts
+from the document.
+
+RULES:
+- Return ONLY valid JSON.
+- JSON format must be:
+{{
+  "keywords": ["keyword1", "keyword2", "keyword3"]
+}}
+- Extract meaningful subject/domain concepts.
+- Prefer technical terms, topics, theories, technologies,
+  methods, algorithms, models, important terminology and named concepts.
+- Use short words or short phrases.
+- Do NOT return generic words such as:
+  "notes", "chapter", "student", "university", "important",
+  "introduction", "page", "document", "question".
+- Do NOT return duplicate keywords.
+- Keep keywords in their normal readable form.
+- Maximum 15 keywords.
+
+DOCUMENT:
+{clean_text}
+"""
+
+    try:
+        raw = call_openai(
+            prompt,
+            max_tokens=300,
+            json_mode=True
+        )
+
+        print("KEYWORD AI RESPONSE:", raw)
+
+        data = json.loads(raw)
+
+        keywords = data.get("keywords", [])
+
+        if not isinstance(keywords, list):
+            return []
+
+        # Clean and normalize
+        cleaned = []
+
+        for keyword in keywords:
+            if not isinstance(keyword, str):
+                continue
+
+            keyword = keyword.strip()
+
+            if not keyword:
+                continue
+
+            if keyword.lower() not in [
+                k.lower() for k in cleaned
+            ]:
+                cleaned.append(keyword)
+
+        return cleaned[:15]
+
+    except Exception as e:
+        print("KEYWORD EXTRACTION ERROR:", str(e))
+
+        # IMPORTANT:
+        # Keyword extraction must NEVER break normal upload.
+        return []
+
+@app.route("/extract-keywords", methods=["POST"])
+def extract_keywords_endpoint():
+    file = request.files.get("file")
+
+    if not file:
+        return jsonify({
+            "keywords": [],
+            "error": "No file"
+        }), 400
+
+    temp_path = os.path.join(
+        UPLOAD_DIR,
+        file.filename
+    )
+
+    try:
+        file.save(temp_path)
+
+        # Reuse existing PDF/OCR extraction
+        text = extract_text(temp_path)
+
+        if not text.strip():
+            return jsonify({
+                "keywords": [],
+                "error": "No readable text found"
+            }), 200
+
+        keywords = extract_keywords(text)
+
+        print("EXTRACTED KEYWORDS:", keywords)
+
+        return jsonify({
+            "keywords": keywords
+        })
+
+    except Exception as e:
+        print("KEYWORD ENDPOINT ERROR:", str(e))
+
+        # Do NOT make upload dependent on this
+        return jsonify({
+            "keywords": [],
+            "error": str(e)
+        }), 200
+
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 # CHUNKING
 
