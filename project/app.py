@@ -115,7 +115,7 @@ def extract_text(path):
         if text.strip():
             return text
 
-        print("⚠️ PDF has no text, using OCR...")
+        print("PDF has no text, using OCR...")
 
         try:
             import pdf2image
@@ -180,7 +180,6 @@ def chunk_text(text):
     import re
 
     # 🔹 Clean text (VERY IMPORTANT)
-    # text = re.sub(r'\s+', ' ', text)
     text = text.replace("\n", " ")
 
     # 🔹 Split by sentences instead of words
@@ -279,13 +278,13 @@ def search(query, k=TOP_K, source=None, session_id=None):
 
     for idx, dist in zip(I[0], D[0]):
 
-        # 🔥 filter weak matches
+        #  filter weak matches
         if dist > 2.5:
             continue
 
         doc = documents[idx]
 
-# 🔥 SESSION PRIORITY (ADD THIS BLOCK)
+#  SESSION PRIORITY (ADD THIS BLOCK)
         if session_id and session_id in doc["source"]:
             semantic_results.insert(0, doc["text"])
             continue
@@ -322,7 +321,7 @@ def search(query, k=TOP_K, source=None, session_id=None):
 
         if match_count >= 2:
             if session_id and session_id in doc["source"]:
-                keyword_strong.insert(0, doc["text"])  # 🔥 priority
+                keyword_strong.insert(0, doc["text"])  #  priority
             else:
                 keyword_strong.append(doc["text"])
 
@@ -335,7 +334,7 @@ def search(query, k=TOP_K, source=None, session_id=None):
                 filtered_semantic.append(chunk)
     else:
         filtered_semantic = semantic_results
-    # 🔥 FORCE INCLUDE (SESSION KEYWORD MATCH)
+    #  FORCE INCLUDE (SESSION KEYWORD MATCH)
     for doc in documents:
         if session_id and session_id in doc["source"]:
             text = doc["text"].lower()
@@ -356,7 +355,7 @@ def search(query, k=TOP_K, source=None, session_id=None):
 
         score = 0
 
-        # 🔥 SESSION BOOST (CORRECT PLACE)
+        #  SESSION BOOST (CORRECT PLACE)
         for doc in documents:
             if doc["text"] == chunk and session_id and session_id in doc["source"]:
                 score += 20
@@ -371,7 +370,7 @@ def search(query, k=TOP_K, source=None, session_id=None):
         if query_lower in text:
             score += 40
 
-        # 🔥 name boost
+        #  name boost
         if any(word[0].isupper() for word in query.split()):
             score += 10
 
@@ -383,7 +382,7 @@ def search(query, k=TOP_K, source=None, session_id=None):
     scored.sort(reverse=True, key=lambda x: x[0])
 
     # 🔹 8. Remove duplicates + limit
-    # 🔥 GROUP BY FILE (NEW LOGIC)
+    #  GROUP BY FILE (NEW LOGIC)
     file_map = {}
 
     for score, chunk in scored:
@@ -401,18 +400,18 @@ def search(query, k=TOP_K, source=None, session_id=None):
                 file_map[src]["chunks"].append(chunk)
                 break
 
-    # 🔥 SORT FILES BY SCORE
+    #  SORT FILES BY SCORE
     sorted_files = sorted(
         file_map.items(),
         key=lambda x: x[1]["score"],
         reverse=True
     )
 
-    # 🔥 BUILD FINAL RESULTS
+    #  BUILD FINAL RESULTS
     final = []
 
     for src, data in sorted_files:
-        for chunk in data["chunks"][:3]:  # max 3 chunks per file
+        for chunk in data["chunks"][:5]:  # max 5 chunks per file
             final.append({
                 "text": chunk,
                 "source": src
@@ -434,7 +433,7 @@ def call_openai(prompt, max_tokens=700, json_mode=False):
         "model": "openai/gpt-4o-mini",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
-        "temperature": 0.3
+        "temperature": 0.8
     }
     
     if json_mode:
@@ -454,13 +453,13 @@ You are a helpful AI assistant.
 Answer the question using ONLY the given context.
 
 RULES:
-- Give a COMPLETE answer (not short)
+- Give a COMPLETE answer (not short or not too Long)
 - Explain clearly in simple language
 - If multiple points exist → use bullet points
 - Combine information from multiple chunks if needed
 - Do NOT say "not found"
 - Do NOT guess
-- Do NOT use external knowledge
+- Do NOT use external knowledge if any relevant data find from context
 - Answer should feel like a short explanation, not just a line
 
 Context:
@@ -472,40 +471,113 @@ Question:
 Answer:
 """
 
-def build_quiz_prompt(context):
+
+# def build_quiz_prompt(context, previous_quiz=None):
+#     return f"""
+# You are a strict JSON generator.
+
+# TASK:
+# Generate EXACTLY 5 multiple choice questions (MCQs).
+
+# CRITICAL RULES (DO NOT BREAK):
+# - Output ONLY valid JSON
+# - DO NOT write any text before or after JSON
+# - JSON must start with {{ and end with }}
+# - Always return complete JSON
+# - If unsure, still return valid JSON with empty quiz []
+
+# FORMAT (STRICT):
+# {{
+#   "quiz": [
+#     {{
+#       "question": "Question text",
+#       "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
+#       "answer": 0,
+#       "topic": "General",
+#       "explanation": "Explanation of correct answer"
+#     }}
+#   ]
+# }}
+
+# RULES:
+# - Exactly 5 questions
+# - Each question must be unique
+# - options length MUST be 4
+# - answer must be index (0,1,2,3)
+# - DO NOT include numbering inside options
+# - explanation must be clear
+# - Regenerate from context if it comes again
+
+# Context:
+# {context[:1200]}
+# """
+
+def build_quiz_prompt(context, previous_quiz=None):
+    previous_quiz = previous_quiz or []
+
+    previous_questions = "\n".join(
+        f"- {q.get('question', '')}"
+        for q in previous_quiz
+        if isinstance(q, dict) and q.get("question")
+    )
+
+    regeneration_rules = ""
+
+    if previous_questions:
+        regeneration_rules = f"""
+IMPORTANT REGENERATION RULES:
+- This is a regeneration request.
+- Generate completely NEW questions.
+- DO NOT repeat any previous question.
+- DO NOT simply rephrase a previous question.
+- DO NOT ask the same question with different options.
+- Try to test different concepts from the provided context.
+
+PREVIOUS QUESTIONS:
+{previous_questions}
+"""
+
     return f"""
 You are a strict JSON generator.
 
 TASK:
 Generate EXACTLY 5 multiple choice questions (MCQs).
 
-CRITICAL RULES (DO NOT BREAK):
+CRITICAL RULES:
 - Output ONLY valid JSON
 - DO NOT write any text before or after JSON
 - JSON must start with {{ and end with }}
 - Always return complete JSON
-- If unsure, still return valid JSON with empty quiz []
 
-FORMAT (STRICT):
+RULES:
+- Exactly 5 questions
+- Each question must be unique
+- Each question must have exactly 4 options
+- answer must be an index: 0, 1, 2, or 3
+- DO NOT include numbering inside options
+- explanation must be clear
+- Questions must be based ONLY on the provided context
+- Cover different concepts from the context where possible
+
+{regeneration_rules}
+
+FORMAT:
 {{
   "quiz": [
     {{
       "question": "Question text",
-      "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
+      "options": [
+        "Option 1",
+        "Option 2",
+        "Option 3",
+        "Option 4"
+      ],
       "answer": 0,
       "topic": "General",
       "explanation": "Explanation of correct answer"
     }}
   ]
 }}
-
-RULES:
-- Exactly 5 questions
-- Each question must be unique
-- options length MUST be 4
-- answer must be index (0,1,2,3)
-- DO NOT include numbering inside options
-- explanation must be clear
 
 Context:
 {context[:1200]}
@@ -559,8 +631,6 @@ def upload():
         if path and os.path.exists(path):
             os.remove(path)  
         
-            
-
 @app.route("/convert", methods=["POST"])
 def convert_file():
     file = request.files.get("file")
@@ -605,21 +675,21 @@ def ask_rag():
         if not question:
             return jsonify({"error": "Question required"}), 400
 
-        # 🔹 1. Retrieve chunks (session-aware search)
+        #  1. Retrieve chunks (session-aware search)
         context_chunks = search(
             question,
             source=source,
             session_id=session_id
         )
 
-        print("\n🧠 QUESTION:", question)
+        print("\n QUESTION:", question)
 
         print("\n========== RETRIEVED CHUNKS ==========")
         for i, item in enumerate(context_chunks[:5]):
             print(f"\nCHUNK {i+1}:\n", item["text"][:300])
         print("======================================")
 
-        # 🔹 2. Split into session + global
+        #  2. Split into session + global
         session_chunks = []
         global_chunks = []
 
@@ -632,15 +702,15 @@ def ask_rag():
             else:
                 global_chunks.append(text)
 
-        # 🔹 3. Build smart context
+        #  3. Build smart context
         context = ""
 
         if session_chunks:
-            # 🔥 session priority (main file user is working on)
-            # 🔥 GROUP BY SOURCE (FILE)
+            # session priority (main file user is working on)
+            # GROUP BY SOURCE (FILE)
             file_context = {}
 
-# 🔥 PRIORITIZE SESSION FILE
+#  PRIORITIZE SESSION FILE
             for item in context_chunks:
                 src = item["source"]
                 text = item["text"]
@@ -651,7 +721,7 @@ def ask_rag():
                         file_context[src] = []
                     file_context[src].append(text)
 
-            # 🔥 fallback (agar session empty ho)
+            #  fallback (agar session empty ho)
             if not file_context:
                 for item in context_chunks:
                     src = item["source"]
@@ -661,25 +731,25 @@ def ask_rag():
                         file_context[src] = []
 
                     file_context[src].append(text)
-            # 🔥 PICK BEST FILE
+            #  PICK BEST FILE
             best_file = max(file_context.items(), key=lambda x: len(x[1]))[0]
 
-            # 🔥 BUILD CONTEXT FROM SAME FILE
+            #  BUILD CONTEXT FROM SAME FILE
             context = "\n\n".join(file_context[best_file][:12])
         else:
-            # 🔥 fallback to global chunks
+            #  fallback to global chunks
             context = "\n\n".join(global_chunks[:6])
 
-        # 🔹 4. Weak context detection
+        #  4. Weak context detection
         is_weak_context = (
             not context_chunks
             or len(context_chunks) < 2
             or len(context_chunks[0]["text"].split()) < 25
         )
 
-        # 🔹 5. GLOBAL FALLBACK (important)
+        #  5. GLOBAL FALLBACK (important)
         if is_weak_context and not session_chunks:
-            print("⚠️ Weak context → controlled fallback")
+            print("Weak context → controlled fallback")
 
             prompt = f"""
         Answer the question.
@@ -749,13 +819,13 @@ def ask_pdf():
 
     chunks = chunk_text(text)
 
-    # ✅ SESSION MEMORY (MAIN FIX)
+    # SESSION MEMORY (MAIN FIX)
     session_id = request.form.get("session_id", "temp_session")
     source = f"{session_id}/{file.filename}"
 
     add_chunks(chunks, source=source)
 
-    # ✅ USE GLOBAL SEARCH (NOT TEMP INDEX)
+    # USE GLOBAL SEARCH (NOT TEMP INDEX)
     results = search(question, session_id=session_id)
 
     relevant_chunks = [r["text"] for r in results[:5]]
@@ -776,7 +846,7 @@ def ask_file():
     temp_path = os.path.join(UPLOAD_DIR, file.filename)
     file.save(temp_path)
 
-    # 🔥 IMPORTANT: USE UNIVERSAL EXTRACT
+    # IMPORTANT: USE UNIVERSAL EXTRACT
     text = extract_text(temp_path)
 
     if not text.strip():
@@ -784,7 +854,7 @@ def ask_file():
 
     chunks = chunk_text(text)
 
-# 🔥 create embeddings
+#  create embeddings
     embeddings = embed_model.encode(chunks)
 
     temp_index = faiss.IndexFlatL2(embeddings.shape[1])
@@ -815,6 +885,7 @@ def quiz():
     context = "\n".join(context_chunks)[:600]
 
     prompt = build_quiz_prompt(context)
+  
 
     for _ in range(2):  # retry twice
         raw = call_openai(prompt, max_tokens=800, json_mode=True)
@@ -840,56 +911,162 @@ def quiz():
     })
     
     # File Based Quiz Generation
+# @app.route("/generate-quiz-file", methods=["POST"])
+# def generate_quiz_file():
+#     file = request.files.get("file")
+ 
+#     if not file:
+#         return jsonify({"error": "No file"}), 400
+
+#     # temp_path = "temp_quiz_file"
+#     temp_path = os.path.join(UPLOAD_DIR, file.filename)
+#     file.save(temp_path)
+
+#     #  Extract text (reuse your function)
+#     text = extract_text(temp_path)
+
+#     if not text.strip():
+#         return jsonify({"error": "No text found"})
+
+#     chunks = chunk_text(text)[:15]
+#     context = "\n".join(chunks)
+
+#     prompt = build_quiz_prompt(context)
+
+#     raw = call_openai(prompt, max_tokens=700, json_mode=True)
+#     print("RAW AI OUTPUT:", raw)
+#     try:
+#         start = raw.find("{")
+#         end = raw.rfind("}") + 1
+#         clean = raw[start:end]
+#         data = json.loads(clean)
+
+#         # ALWAYS RETURN SAME STRUCTURE
+#         quiz = data.get("quiz")
+
+#         if not quiz or not isinstance(quiz, list):
+#             return jsonify({
+#                 "quiz": [],
+#                 "error": "Invalid quiz format from AI"
+#             })
+
+#         return jsonify({
+#             "quiz": quiz
+#         })
+#     except:
+#         print("RAW OUTPUT:", raw)
+
+#         return jsonify({
+#             "quiz": [],
+#             "error": "JSON parse failed"
+#         })
+
+# File Based Quiz Generation
 @app.route("/generate-quiz-file", methods=["POST"])
 def generate_quiz_file():
     file = request.files.get("file")
- 
+
     if not file:
         return jsonify({"error": "No file"}), 400
 
-    # temp_path = "temp_quiz_file"
     temp_path = os.path.join(UPLOAD_DIR, file.filename)
-    file.save(temp_path)
-
-    # 🔹 Extract text (reuse your function)
-    text = extract_text(temp_path)
-
-    if not text.strip():
-        return jsonify({"error": "No text found"})
-
-    chunks = chunk_text(text)[:15]
-    context = "\n".join(chunks)
-
-    prompt = build_quiz_prompt(context)
-
-    raw = call_openai(prompt, max_tokens=700, json_mode=True)
-    print("RAW AI OUTPUT:", raw)
 
     try:
+        file.save(temp_path)
+
+        # 🔹 Extract text
+        text = extract_text(temp_path)
+
+        if not text.strip():
+            return jsonify({
+                "quiz": [],
+                "error": "No text found"
+            }), 400
+
+        # 🔹 Get regeneration information
+        regenerate = (
+            request.form.get("regenerate", "false").lower()
+            == "true"
+        )
+
+        previous_quiz_raw = request.form.get(
+            "previousQuiz",
+            "[]"
+        )
+
+        try:
+            previous_quiz = json.loads(previous_quiz_raw)
+
+            if not isinstance(previous_quiz, list):
+                previous_quiz = []
+
+        except Exception:
+            previous_quiz = []
+
+        print("REGENERATE:", regenerate)
+        print(
+            "PREVIOUS QUIZ QUESTIONS:",
+            len(previous_quiz)
+        )
+
+        # 🔹 Prepare context
+        chunks = chunk_text(text)[:15]
+        context = "\n".join(chunks)
+
+        # 🔹 Build prompt
+        prompt = build_quiz_prompt(
+            context,
+            previous_quiz if regenerate else []
+        )
+
+        # 🔹 Generate quiz
+        raw = call_openai(
+            prompt,
+            max_tokens=700,
+            json_mode=True
+        )
+
+        print("RAW AI OUTPUT:", raw)
+
+        # 🔹 Parse JSON
         start = raw.find("{")
         end = raw.rfind("}") + 1
+
+        if start == -1 or end <= start:
+            return jsonify({
+                "quiz": [],
+                "error": "Invalid JSON returned by AI"
+            }), 500
+
         clean = raw[start:end]
         data = json.loads(clean)
 
-        # ALWAYS RETURN SAME STRUCTURE
         quiz = data.get("quiz")
 
         if not quiz or not isinstance(quiz, list):
             return jsonify({
                 "quiz": [],
                 "error": "Invalid quiz format from AI"
-            })
+            }), 500
 
         return jsonify({
             "quiz": quiz
         })
-    except:
-        print("RAW OUTPUT:", raw)
+
+    except Exception as e:
+        print("GENERATE QUIZ ERROR:", str(e))
 
         return jsonify({
             "quiz": [],
-            "error": "JSON parse failed"
-        })
+            "error": str(e)
+        }), 500
+
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 # =========================
 # RUN
 # =========================
