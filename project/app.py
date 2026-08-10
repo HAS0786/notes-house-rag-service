@@ -18,7 +18,8 @@ from PIL import Image
 import pytesseract
 import cv2
 import json
-
+# Calculate PDF identity
+import hashlib
 import subprocess
 
 from dotenv import load_dotenv
@@ -29,7 +30,6 @@ load_dotenv()
 
 def convert_to_pdf(input_path):
     output_dir = os.path.dirname(input_path)
-    # libreoffice_path = r"C:\Program Files\LibreOffice\program\soffice.exe"
     libreoffice_path = "soffice"
     result = subprocess.call([
         libreoffice_path,
@@ -45,7 +45,7 @@ def convert_to_pdf(input_path):
     print("RESULT:", result)
     print("PDF PATH:", pdf_path)
 
-    # 🔥 CRITICAL CHECK
+    #  CRITICAL CHECK
     if result != 0 or not os.path.exists(pdf_path):
         raise Exception("PDF conversion failed")
 
@@ -86,6 +86,7 @@ def save_state():
     faiss.write_index(index, FAISS_PATH)
     with open(DOCS_PATH, "wb") as f:
         pickle.dump(documents, f)
+        
 
 
 # FILE → TEXT
@@ -309,16 +310,17 @@ def extract_keywords_endpoint():
                 os.remove(temp_path)
             except Exception:
                 pass
-
+# ========================
 # CHUNKING
+# ========================
 
 def chunk_text(text):
     import re
 
-    # 🔹 Clean text (VERY IMPORTANT)
+    #  Clean text (VERY IMPORTANT)
     text = text.replace("\n", " ")
 
-    # 🔹 Split by sentences instead of words
+    #  Split by sentences instead of words
     paragraphs = [p.strip() for p in text.split("\n") if len(p.strip()) > 20]
     MAX_CHUNK_SIZE = 1200  
     OVERLAP = 200 
@@ -337,7 +339,13 @@ def chunk_text(text):
 
     return chunks
 # STORE
-def add_chunks(chunks, source):
+def add_chunks(chunks, source, file_hash=None):
+      #  Prevent duplicate indexing
+    if file_hash:
+        for doc in documents:
+            if doc.get("file_hash") == file_hash:
+                print("FILE ALREADY INDEXED:", file_hash)
+                return False
     clean_chunks = []
 
     for chunk in chunks:
@@ -364,10 +372,12 @@ def add_chunks(chunks, source):
     for chunk in clean_chunks:
         documents.append({
             "text": chunk,
-            "source": source
+            "source": source,
+            "file_hash": file_hash
         })
 
     save_state()
+    return True
 
 # Keyword search 
 def keyword_search(query, top_k=10,session_id=None):
@@ -406,7 +416,7 @@ def search(query, k=TOP_K, source=None, session_id=None):
     "submitted", "author", "developer", "team", "group"
     ]) or len(query_words) <= 5
 
-    # 🔹 1. Semantic search
+    #  1. Semantic search
     q_emb = embed_model.encode([query])
     D, I = index.search(np.array(q_emb), k * 10)
 
@@ -430,10 +440,10 @@ def search(query, k=TOP_K, source=None, session_id=None):
             continue
 
         semantic_results.append(doc["text"])
-    # 🔹 2. Keyword search
+    #  2. Keyword search
     keyword_results = keyword_search(query, top_k=10, session_id=session_id)
 
-    # 🔹 3. Exact match boost
+    #  3. Exact match boost
     exact_matches = []
 
     for doc in documents:
@@ -447,7 +457,7 @@ def search(query, k=TOP_K, source=None, session_id=None):
             for _ in range(match_count * 3):
                 exact_matches.append(doc["text"])
 
-    # 🔹 4. Strong keyword candidates (generic fix)
+    #  4. Strong keyword candidates (generic fix)
     keyword_strong = []
 
     for doc in documents:
@@ -461,7 +471,7 @@ def search(query, k=TOP_K, source=None, session_id=None):
             else:
                 keyword_strong.append(doc["text"])
 
-    # 🔹 5. FILTER semantic (important for factual queries)
+    #  5. FILTER semantic (important for factual queries)
     if is_fact_query:
         filtered_semantic = []
         for chunk in semantic_results:
@@ -478,10 +488,10 @@ def search(query, k=TOP_K, source=None, session_id=None):
             if any(w in text for w in query_words):
                 filtered_semantic.insert(0, doc["text"])
 
-    # 🔹 6. Merge all
+    #  6. Merge all
     combined = exact_matches + keyword_strong + filtered_semantic + keyword_results
     combined = list(dict.fromkeys(combined))
-    # 🔹 7. Rerank
+    #  7. Rerank
     scored = []
 
    
@@ -517,7 +527,7 @@ def search(query, k=TOP_K, source=None, session_id=None):
 
     scored.sort(reverse=True, key=lambda x: x[0])
 
-    # 🔹 8. Remove duplicates + limit
+    #  8. Remove duplicates + limit
     #  GROUP BY FILE (NEW LOGIC)
     file_map = {}
 
@@ -556,7 +566,7 @@ def search(query, k=TOP_K, source=None, session_id=None):
         if len(final) >= k:
             break
 
-    # 🔥 DEBUG
+    #  DEBUG
     print("\n🔥 FINAL TOP CHUNKS:")
     for i, item in enumerate(final[:5]):
         print(f"\n{i+1}:", item["text"][:200])
@@ -606,47 +616,6 @@ Question:
 
 Answer:
 """
-
-
-# def build_quiz_prompt(context, previous_quiz=None):
-#     return f"""
-# You are a strict JSON generator.
-
-# TASK:
-# Generate EXACTLY 5 multiple choice questions (MCQs).
-
-# CRITICAL RULES (DO NOT BREAK):
-# - Output ONLY valid JSON
-# - DO NOT write any text before or after JSON
-# - JSON must start with {{ and end with }}
-# - Always return complete JSON
-# - If unsure, still return valid JSON with empty quiz []
-
-# FORMAT (STRICT):
-# {{
-#   "quiz": [
-#     {{
-#       "question": "Question text",
-#       "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
-#       "answer": 0,
-#       "topic": "General",
-#       "explanation": "Explanation of correct answer"
-#     }}
-#   ]
-# }}
-
-# RULES:
-# - Exactly 5 questions
-# - Each question must be unique
-# - options length MUST be 4
-# - answer must be index (0,1,2,3)
-# - DO NOT include numbering inside options
-# - explanation must be clear
-# - Regenerate from context if it comes again
-
-# Context:
-# {context[:1200]}
-# """
 
 def build_quiz_prompt(context, previous_quiz=None):
     previous_quiz = previous_quiz or []
@@ -720,7 +689,7 @@ Context:
 """
 # UPLOAD
 
-indexed_hashes = set()
+# indexed_hashes = set()
 
 @app.route("/upload", methods=["POST"])
 def upload():
@@ -734,11 +703,6 @@ def upload():
         file_hash = hashlib.sha256(file_bytes).hexdigest()
 
         file.seek(0)
-
-        if file_hash in indexed_hashes:
-            return jsonify({"status": "already indexed"})
-
-        indexed_hashes.add(file_hash)
 
         path = os.path.join(UPLOAD_DIR, file.filename)
         file.save(path)
@@ -755,7 +719,15 @@ def upload():
 
         source = f"{session_id}/{file.filename}"
 
-        add_chunks(chunks, source=source)
+        added = add_chunks(
+            chunks,
+            source=source,
+            file_hash=file_hash
+        )
+        if not added:
+            return jsonify({
+                "status": "already indexed"
+    })
 
         return jsonify({"status": "indexed", "chunks": len(chunks)})
 
@@ -797,7 +769,10 @@ def convert_file():
         # 🔥 ADD THIS (CRITICAL)
         if os.path.exists(input_path):
             os.remove(input_path)
+
+# =========================
 # ASK (RAG)
+# ========================
 
 @app.route("/ask-rag", methods=["POST"])
 def ask_rag():
@@ -959,7 +934,15 @@ def ask_pdf():
     session_id = request.form.get("session_id", "temp_session")
     source = f"{session_id}/{file.filename}"
 
-    add_chunks(chunks, source=source)
+    with open(temp_path, "rb") as f:
+        file_hash = hashlib.sha256(f.read()).hexdigest()
+
+#  Add only if this exact PDF is not already indexed
+    add_chunks(
+        chunks,
+        source=source,
+        file_hash=file_hash
+    )
 
     # USE GLOBAL SEARCH (NOT TEMP INDEX)
     results = search(question, session_id=session_id)
@@ -1045,59 +1028,10 @@ def quiz():
         "error": "JSON parse failed",
         "raw": raw
     })
-    
-    # File Based Quiz Generation
-# @app.route("/generate-quiz-file", methods=["POST"])
-# def generate_quiz_file():
-#     file = request.files.get("file")
- 
-#     if not file:
-#         return jsonify({"error": "No file"}), 400
-
-#     # temp_path = "temp_quiz_file"
-#     temp_path = os.path.join(UPLOAD_DIR, file.filename)
-#     file.save(temp_path)
-
-#     #  Extract text (reuse your function)
-#     text = extract_text(temp_path)
-
-#     if not text.strip():
-#         return jsonify({"error": "No text found"})
-
-#     chunks = chunk_text(text)[:15]
-#     context = "\n".join(chunks)
-
-#     prompt = build_quiz_prompt(context)
-
-#     raw = call_openai(prompt, max_tokens=700, json_mode=True)
-#     print("RAW AI OUTPUT:", raw)
-#     try:
-#         start = raw.find("{")
-#         end = raw.rfind("}") + 1
-#         clean = raw[start:end]
-#         data = json.loads(clean)
-
-#         # ALWAYS RETURN SAME STRUCTURE
-#         quiz = data.get("quiz")
-
-#         if not quiz or not isinstance(quiz, list):
-#             return jsonify({
-#                 "quiz": [],
-#                 "error": "Invalid quiz format from AI"
-#             })
-
-#         return jsonify({
-#             "quiz": quiz
-#         })
-#     except:
-#         print("RAW OUTPUT:", raw)
-
-#         return jsonify({
-#             "quiz": [],
-#             "error": "JSON parse failed"
-#         })
-
+# ========================= 
 # File Based Quiz Generation
+# =========================
+
 @app.route("/generate-quiz-file", methods=["POST"])
 def generate_quiz_file():
     file = request.files.get("file")
@@ -1110,7 +1044,7 @@ def generate_quiz_file():
     try:
         file.save(temp_path)
 
-        # 🔹 Extract text
+        #  Extract text
         text = extract_text(temp_path)
 
         if not text.strip():
@@ -1119,7 +1053,7 @@ def generate_quiz_file():
                 "error": "No text found"
             }), 400
 
-        # 🔹 Get regeneration information
+        #  Get regeneration information
         regenerate = (
             request.form.get("regenerate", "false").lower()
             == "true"
@@ -1145,17 +1079,17 @@ def generate_quiz_file():
             len(previous_quiz)
         )
 
-        # 🔹 Prepare context
+        #  Prepare context
         chunks = chunk_text(text)[:15]
         context = "\n".join(chunks)
 
-        # 🔹 Build prompt
+        #  Build prompt
         prompt = build_quiz_prompt(
             context,
             previous_quiz if regenerate else []
         )
 
-        # 🔹 Generate quiz
+        #  Generate quiz
         raw = call_openai(
             prompt,
             max_tokens=700,
@@ -1164,7 +1098,7 @@ def generate_quiz_file():
 
         print("RAW AI OUTPUT:", raw)
 
-        # 🔹 Parse JSON
+        #  Parse JSON
         start = raw.find("{")
         end = raw.rfind("}") + 1
 
@@ -1207,8 +1141,7 @@ def generate_quiz_file():
 # RUN
 # =========================
 if __name__ == "__main__":
-    # app.run(debug=True,)
-    # app.run(host="0.0.0.0", port=5000, debug=True,use_reloader=False)
+   
     app.run(
     host=os.getenv("FLASK_HOST", "0.0.0.0"),
     port=int(os.getenv("FLASK_PORT", "5000"))
