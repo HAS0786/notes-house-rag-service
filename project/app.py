@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify
 import faiss
 from sentence_transformers import SentenceTransformer
 from openai import OpenAI
-
+import tempfile
 from config import *
 
 # File readers
@@ -270,10 +270,19 @@ def extract_keywords_endpoint():
             "error": "No file"
         }), 400
 
-    temp_path = os.path.join(
-        UPLOAD_DIR,
-        file.filename
+    # Create a PRIVATE temporary file for keyword extraction.
+    # IMPORTANT:
+    # Do NOT use UPLOAD_DIR because Node.js also uses
+    # /app/data/temp for the original uploaded file.
+    file_ext = os.path.splitext(file.filename)[1] or ".pdf"
+
+    temp_file = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=file_ext
     )
+
+    temp_path = temp_file.name
+    temp_file.close()
 
     try:
         file.save(temp_path)
@@ -305,11 +314,15 @@ def extract_keywords_endpoint():
         }), 200
 
     finally:
+        # Delete ONLY the private keyword-extraction temp file.
+        # This will NOT delete Node's /app/data/temp uploaded file.
         if os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
             except Exception:
                 pass
+
+
 # ========================
 # CHUNKING
 # ========================
