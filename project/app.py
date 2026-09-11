@@ -1,7 +1,7 @@
-from csv import reader
+# from csv import reader
 import os
 import pickle
-from pydoc import text
+# from pydoc import text
 import numpy as np
 from flask import Flask, request, jsonify
 import faiss
@@ -14,7 +14,7 @@ from config import *
 from pypdf import PdfReader
 from docx import Document
 from pptx import Presentation
-from PIL import Image
+# from PIL import Image
 import pytesseract
 import cv2
 import json
@@ -27,7 +27,7 @@ import os
 
 load_dotenv()
 
-
+# PDF Conversion Function (LibreOffice used for .docx, .pptx, etc.)
 def convert_to_pdf(input_path):
     output_dir = os.path.dirname(input_path)
     libreoffice_path = "soffice"
@@ -51,17 +51,19 @@ def convert_to_pdf(input_path):
 
     return pdf_path
 
-# INIT
-
+# INIT 
 app = Flask(__name__)
 
+#API openai client
 client = OpenAI(
     api_key=OPENAI_API_KEY,
     base_url="https://openrouter.ai/api/v1"
 )
 
+# Tesseract OCR for image-based PDFs and images
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 
+# 
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 DIM = 384
 
@@ -156,7 +158,7 @@ def extract_text(path):
 
     elif ext in [".png", ".jpg", ".jpeg"]:
         try:
-            # result = ocr.ocr(path)
+            
             img = cv2.imread(path)
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
@@ -260,6 +262,7 @@ DOCUMENT:
         # Keyword extraction must NEVER break normal upload.
         return []
 
+# API create for Extract keyword (called from Node.js)
 @app.route("/extract-keywords", methods=["POST"])
 def extract_keywords_endpoint():
     file = request.files.get("file")
@@ -270,10 +273,10 @@ def extract_keywords_endpoint():
             "error": "No file"
         }), 400
 
-    # Create a PRIVATE temporary file for keyword extraction.
     # IMPORTANT:
-    # Do NOT use UPLOAD_DIR because Node.js also uses
-    # /app/data/temp for the original uploaded file.
+    # Create a PRIVATE temporary file for keyword extraction.
+    # Do NOT use UPLOAD_DIR because Node.js also uses /app/data/temp for the original uploaded file.
+    
     file_ext = os.path.splitext(file.filename)[1] or ".pdf"
 
     temp_file = tempfile.NamedTemporaryFile(
@@ -328,7 +331,6 @@ def extract_keywords_endpoint():
 # ========================
 
 def chunk_text(text):
-    import re
 
     #  Clean text (VERY IMPORTANT)
     text = text.replace("\n", " ")
@@ -351,6 +353,7 @@ def chunk_text(text):
         chunks.append(current_chunk.strip())
 
     return chunks
+
 # STORE
 def add_chunks(chunks, source, file_hash=None):
       #  Prevent duplicate indexing
@@ -414,8 +417,8 @@ def keyword_search(query, top_k=10,session_id=None):
 
     results.sort(reverse=True, key=lambda x: x[0])
     return [r[1] for r in results[:top_k]]
-# SEARCH
 
+# SEARCH
 def search(query, k=TOP_K, source=None, session_id=None):
     if len(documents) == 0:
         return []
@@ -580,11 +583,13 @@ def search(query, k=TOP_K, source=None, session_id=None):
             break
 
     #  DEBUG
-    print("\n🔥 FINAL TOP CHUNKS:")
+    print("\n FINAL TOP CHUNKS:")
     for i, item in enumerate(final[:5]):
         print(f"\n{i+1}:", item["text"][:200])
 
     return final
+
+
 # OPENAI CALL
 
 def call_openai(prompt, max_tokens=700, json_mode=False):
@@ -604,7 +609,6 @@ def call_openai(prompt, max_tokens=700, json_mode=False):
 
 
 # PROMPTS
-
 def build_answer_prompt(context, question):
     return f"""
 You are a helpful AI assistant.
@@ -700,21 +704,16 @@ FORMAT:
 Context:
 {context[:1200]}
 """
+
 # UPLOAD
-
-# indexed_hashes = set()
-
 @app.route("/upload", methods=["POST"])
 def upload():
     path = None
     try:
         import hashlib
-
         file = request.files["file"]
-
         file_bytes = file.read()
         file_hash = hashlib.sha256(file_bytes).hexdigest()
-
         file.seek(0)
 
         path = os.path.join(UPLOAD_DIR, file.filename)
@@ -752,6 +751,7 @@ def upload():
         if path and os.path.exists(path):
             os.remove(path)  
         
+        
 @app.route("/convert", methods=["POST"])
 def convert_file():
     file = request.files.get("file")
@@ -779,7 +779,7 @@ def convert_file():
         return jsonify({"error": str(e)}), 500
 
     finally:
-        # 🔥 ADD THIS (CRITICAL)
+        # ADD THIS (CRITICAL)
         if os.path.exists(input_path):
             os.remove(input_path)
 
@@ -791,7 +791,6 @@ def convert_file():
 def ask_rag():
     try:
         data = request.get_json()
-
         question = data.get("question")
         source = data.get("source")
         session_id = data.get("session_id")
@@ -906,6 +905,8 @@ def ask_rag():
     except Exception as e:
         print("ASK_RAG ERROR:", str(e))
         return jsonify({"error": str(e)}), 500
+    
+    
 #  COMBINED ENDPOINT
 @app.route("/ask-ai", methods=["POST"])
 def ask_ai():
